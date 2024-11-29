@@ -5,24 +5,103 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <format>
+#include <stdexcept>
+#include <limits>
+#include <filesystem>
 #include <vector>
+#include <regex> 
 #include <iomanip>
 #include <sstream>
-#include <limits>
-#define NOMINMAX
 #include <windows.h>
 
 using namespace std;
+using namespace std::filesystem;
 
-struct Books {
-    unsigned int bookID;
-    string authors;
-    string title;
-    string releaseDate;
-    double price;
-    int quantity;
-    string saleDate;
-} book;
+class Books {
+public:
+    unsigned int bookID = 0;
+    string authors = "Author";
+    string title = "Title";
+    string releaseDate = "0000-00-00";
+    double price = 0.0;
+    int quantity = 0;
+    string saleDate = "0000-00-00";
+
+    string toString() const {
+        ostringstream oss;
+        oss << left << "|" << setw(10) << bookID << "|"
+            << setw(20) << authors << "|"
+            << setw(34) << title << "|"
+            << setw(11) << releaseDate << "|"
+            << setw(10) << fixed << setprecision(2) << price << "|"
+            << setw(6) << quantity << "|"
+            << setw(12) << saleDate << "|";
+        return oss.str();
+    }
+
+    static optional<Books> fromFileLine(const string& line) {
+        istringstream record(line);
+        Books book;
+
+        string ghost, idStr, priceStr, quantityStr;
+
+        if (!(getline(record, ghost, '|') &&
+            getline(record, idStr, '|') &&
+            getline(record, book.authors, '|') &&
+            getline(record, book.title, '|') &&
+            getline(record, book.releaseDate, '|') &&
+            getline(record, priceStr, '|') &&
+            getline(record, quantityStr, '|') &&
+            getline(record, book.saleDate, '|'))) {
+            throw invalid_argument("Некорректная строка файла.");
+        }
+        book.bookID = stoi(trim(idStr));
+        book.price = stod(trim(priceStr));
+        book.quantity = stoi(trim(quantityStr));
+        book.releaseDate = trim(book.releaseDate);
+        book.saleDate = trim(book.saleDate);
+
+        return book;
+    }
+
+private:
+   static string trim(const string& str) {
+        string trimmed = str;
+        trimmed.erase(remove_if(trimmed.begin(), trimmed.end(), ::isspace), trimmed.end());
+        return trimmed;
+    }
+};
+
+enum MenuOption {
+    CREATE_FILE = 1,
+    SELECT_FILE,
+    ADD_RECORD,
+    DISPLAY_RECORDS,
+    DELETE_RECORD_BY_NUMBER,
+    DELETE_RECORDS_BY_DATE,
+    UPDATE_BOOK_PRICE,
+    DISPLAY_BOOKS_IN_TIME_RANGE,
+    BACKUP_FILE,
+    RESTORE_FILE,
+    DELETE_FILE,
+    EXIT = 0
+};
+
+class FileException : public runtime_error {
+public:
+    FileException(const string& message) : runtime_error(message) {}
+};
+
+class InputException : public invalid_argument {
+public:
+    InputException(const string& message) : invalid_argument(message) {}
+};
+
+class DateException : public logic_error {
+public:
+    DateException(const string& message) : logic_error(message) {}
+};
 
 
 string currentFile;
@@ -41,25 +120,28 @@ void backupFile();
 void restoreFileFromBackup();
 void deleteFile();
 
-int displayMenu();
-void processUserChoice(int choice);
+void setConsoleParams();
 void runApplication();
+int displayMenu();
+bool getUserInput(int& input);
+void processUserChoice(int choice);
+string getInputWithCancel(const string& prompt);
+bool confirmAction(const string& prompt);
 void addRecordMenu();
 Books inputNewRecord();
 bool isBookIDUnique(int bookID);
 string inputReleaseDate();
 bool isValidDate(const string& date);
-int countLinesInFile(const string& filename);
+bool isValidNumber(const string& input, bool allowDecimal, bool allowZero);
 void addTableHeader(ofstream& file);
-void writeRecord(ofstream& file, const Books& book);
-template <typename FilterFunc>
-void processFileWithFilter(FilterFunc shouldDelete, const string& errorMessage);
+vector<Books> readAllBooks(const string& filename);
+void writeAllBooks(const string& filename, const vector<Books>& lines);
+unsigned int countRecords(const vector<Books>& books);
 
 
 int main() {
-    setlocale(LC_ALL, "RU");
-    SetConsoleCP(1251);
-    SetConsoleOutputCP(1251);
+    setConsoleParams();
+
     try {
         runApplication();
     }
@@ -69,6 +151,11 @@ int main() {
     return 0;
 }
 
+void setConsoleParams() {
+    setlocale(LC_ALL, "RU");
+    SetConsoleCP(1251);
+    SetConsoleOutputCP(1251);
+}
 
 void runApplication() {
     int choice;
@@ -85,61 +172,77 @@ void runApplication() {
 
 int displayMenu() {
     int choice;
-    cout << "\nМеню:\n";
-    cout << "1. Создать новый файл\n";
-    cout << "2. Выбрать файл для работы\n";
-    cout << "3. Добавить запись в файл\n";
-    cout << "4. Вывести все записи\n";
-    cout << "5. Удалить запись по номеру\n";
-    cout << "6. Удалить записи по дате выпуска\n";
-    cout << "7. Изменить цену книги\n";
-    cout << "8. Вывести книги в промежутке времени\n";
-    cout << "9. Скопировать данные в резервный файл\n";
-    cout << "10. Восстановить файл из резервного\n";
-    cout << "11. Удалить файл\n";
-    cout << "0. Выход\n";
-    cout << "Ваш выбор: ";
-    cin >> choice;
+    while (true) {
+        cout << "\nМеню:\n";
+        cout << "1. Создать новый файл\n";
+        cout << "2. Выбрать файл для работы\n";
+        cout << "3. Добавить запись в файл\n";
+        cout << "4. Вывести все записи\n";
+        cout << "5. Удалить запись по номеру\n";
+        cout << "6. Удалить записи по дате выпуска\n";
+        cout << "7. Изменить цену книги\n";
+        cout << "8. Вывести книги в промежутке времени\n";
+        cout << "9. Скопировать данные в резервный файл\n";
+        cout << "10. Восстановить файл из резервного\n";
+        cout << "11. Удалить файл\n";
+        cout << "0. Выход\n";
+        cout << "Ваш выбор: ";
 
+        if (cin >> choice) return choice;
+        
+        if (!getUserInput(choice)) {
+            cout << "Ввод некорректный! Пожалуйста, введите число, согласно пункту меню (0 - 11).";
+        }
+        
+    }
+}
+
+bool getUserInput(int& input) {
     if (cin.fail()) {
         cin.clear();
-        cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        throw invalid_argument("Некорректный ввод! Пожалуйста, введите число.");
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
+        return false;
     }
-
-    return choice;
+    return true;
 }
 
 void processUserChoice(int choice) {
-    switch (choice) {
-    case 1: createFile(); break;
-    case 2: selectFile(); break;
-    case 3: addRecordMenu(); break;
-    case 4: displayRecords(); break;
-    case 5: deleteRecordByNumber(); break;
-    case 6: deleteRecordsByReleaseDate(); break;
-    case 7: updateBookPrice(); break;
-    case 8: displayBooksInTimeRange(); break;
-    case 9: backupFile(); break;
-    case 10: restoreFileFromBackup(); break;
-    case 11: deleteFile(); break;
-    case 0: cout << "Выход из программы.\n"; break;
-    default: throw invalid_argument("Некорректный выбор! Пожалуйста, выберите существую-щий пункт меню.");
+    MenuOption option = static_cast<MenuOption>(choice);
+
+    switch (option) {
+    case CREATE_FILE: createFile(); break;
+    case SELECT_FILE: selectFile(); break;
+    case ADD_RECORD: addRecordMenu(); break;
+    case DISPLAY_RECORDS: displayRecords(); break;
+    case DELETE_RECORD_BY_NUMBER: deleteRecordByNumber(); break;
+    case DELETE_RECORDS_BY_DATE: deleteRecordsByReleaseDate(); break;
+    case UPDATE_BOOK_PRICE: updateBookPrice(); break;
+    case DISPLAY_BOOKS_IN_TIME_RANGE: displayBooksInTimeRange(); break;
+    case BACKUP_FILE: backupFile(); break;
+    case RESTORE_FILE: restoreFileFromBackup(); break;
+    case DELETE_FILE: deleteFile(); break;
+    case EXIT: cout << "Выход из программы.\n"; break;
+    default: throw InputException(format("{} - некорректный выбор! Пожалуйста, выберите существующий пункт меню.", choice));
     }
 }
 
-void createFile() {
-    cout << "Введите имя файла: ";
-    string filename;
-    cin >> filename;
+string getInputWithCancel(const string& prompt) {
+    string input;
+    cout << prompt << " (или оставьте строку пустой для отмены): ";
+    cin.ignore(numeric_limits<streamsize>::max(), '\n');
+    getline(cin, input);
 
-    ifstream existingFile(filename);
-    if (existingFile) {
-        existingFile.close();
-        cout << "Файл \"" << filename << "\" уже существует. Все записи файла \"" << filename << "\" будут уничтожены! Перезаписать? (y/n): ";
-        char response;
-        cin >> response;
-        if (response != 'y' && response != 'Y') {
+    if (input.empty()) { cout << "Действие отменено. Возврат в меню.\n"; }
+
+    return input;
+}
+
+void createFile() {
+    string filename = getInputWithCancel("Введите имя файла для работы");
+    if (filename.empty()) return;
+
+    if (exists(filename)) {
+        if (!confirmAction(format("Файл \"{}\" уже существует. Все записи этого файла будут уничтожены! Перезаписать?", filename))) {
             cout << "Файл не был создан.\n";
             return;
         }
@@ -147,50 +250,57 @@ void createFile() {
 
     ofstream newFile(filename, ios::trunc);
     if (!newFile) {
-        throw runtime_error("Не удалось создать файл \"" + filename + "\".");
+        throw FileException(format("Не удалось создать файл \"{}\".", filename));
     }
-    cout << "Файл \"" << filename << "\" успешно создан.\n";
+    cout << format("Файл \"{}\" успешно создан.\n", filename);
 
     currentFile = filename;
 }
 
 void selectFile() {
-    cout << "Введите имя файла для работы: ";
-    string filename;
-    cin >> filename;
+    string filename = getInputWithCancel("Введите имя файла для работы");
+    if (filename.empty()) return;
 
-    ifstream file(filename);
-    if (!file) {
-        cout << "Файл \"" << filename << "\" не существует. Создать его? (y/n): ";
-        char response;
-        cin >> response;
-        if (response == 'y' || response == 'Y') {
-            ofstream newFile(filename);
-            if (!newFile) {
-                throw runtime_error("Не удалось создать файл \"" + filename + "\".");
-            }
-            cout << "Файл \"" << filename << "\" успешно создан.\n";
-        }
-        else {
+    if (!exists(filename)) {
+        if (!confirmAction(format("Файл \"{}\" не существует. Создать его?", filename))) {
             cout << "Выбор файла отменён.\n";
             return;
         }
+        ofstream newFile(filename);
+        if (!newFile) {
+            throw FileException(format("Не удалось создать файл \"{}\".", filename));
+        }
+        cout << format("Файл \"{}\" успешно создан.\n", filename);
     }
 
     currentFile = filename;
-    cout << "Файл \"" << filename << "\" выбран для работы.\n";
+    cout << format("Файл \"{}\" выбран для работы.\n", filename);
+}
+
+bool confirmAction(const string& prompt) {
+    char response;
+    cout << prompt << " (y/любая другая клавиша): ";
+    cin >> response;
+    return response == 'y' || response == 'Y';
 }
 
 void checkCurrentFile() {
     if (currentFile.empty()) {
-        throw runtime_error("Файл не выбран. Пожалуйста, выберите файл из меню 2. \"Выбрать файл для работы\"");
+        throw FileException("Файл не выбран. Пожалуйста, выберите файл из меню 2. \"Выбрать файл для работы\"");
+    }
+    if(!filesystem::exists(currentFile)) {
+        ofstream file(currentFile);
+        if (!file) {
+            throw FileException(format("Ошибка создания файла \"{}\".", currentFile));
+        }
+        file.close();
     }
 }
 
 void addRecordMenu() {
     checkCurrentFile();
 
-    cout << "Выберите способ добавления записи:\n";
+    cout << "\nВыберите способ добавления записи:\n";
     cout << "1. Добавить запись в конец.\n";
     cout << "2. Добавить запись по номеру.\n";
     cout << "0. Отменить добавление записи.\n";
@@ -202,25 +312,20 @@ void addRecordMenu() {
 
     switch (choice) {
     case 1:
-        addRecord();
-        break;
+        addRecord(); break;
     case 2:
-        addRecordByNumber();
-        break;
+        addRecordByNumber(); break;
     case 0:
-        cout << "Добавление записи отменено.\n";
-        break;
+        cout << "Добавление записи отменено.\n"; break;
     default:
-        cout << "Неверный выбор. Возврат в главное меню.\n";
-        break;
+        cout << "Неверный выбор. Возврат в главное меню.\n"; break;
     }
 }
 
 void addRecord() {
+    checkCurrentFile();
+
     ofstream file(currentFile, ios::app);
-    if (!file) {
-        throw runtime_error("Ошибка открытия файла \"" + currentFile + "\" для добавления записи.");
-    }
 
     file.seekp(0, ios::end);
     if (file.tellp() == 0) {
@@ -239,10 +344,10 @@ void addRecord() {
 
         try {
             Books book = inputNewRecord();
-            writeRecord(file, book);
+            file << book.toString() << "\n";
             cout << "Запись успешно добавлена.\n";
         }
-        catch (const runtime_error& e) {
+        catch (const FileException& e) {
             cerr << "Ошибка при выполнении записи в конец файла: " << e.what() << "\n";
             continue;
         }
@@ -251,278 +356,277 @@ void addRecord() {
 }
 
 void addRecordByNumber() {
-    cout << "Введите номер позиции для добавления записи: ";
-    int position;
-    cin >> position;
-    cin.ignore();
+    checkCurrentFile();
 
-    int totalRecords = countLinesInFile(currentFile) - 2;
-    if (position < 0 || (position - totalRecords) > 1) {
-        cout << "Недопустимая позиция для добавления записи. Разница с количеством запи-сей должна быть не более 1.\n";
+    vector<Books> books = readAllBooks(currentFile);
+    unsigned int totalRecords = countRecords(books);
+    string input;
+
+    cout << format("Введите номер позиции для добавления записи от 1 до {}: ", ++totalRecords);
+    cin >> input;
+    cin.ignore();
+    if (!isValidNumber(input, false, false)) {
+        cerr << format("Ошибка: ввод {} недопустим. Номер позиции должен быть натуральным числом.\n", input);
         return;
     }
 
-    ofstream file(currentFile, ios::app);
-    if (!file) {
-        throw runtime_error("Ошибка открытия файла \"" + currentFile + "\" для добавления записи.");
-    }
-
-    file.seekp(0, ios::end);
-    if (file.tellp() == 0) {
-        addTableHeader(file);
-    }
-
-    file.close();
-
+    unsigned int position = stoi(input) - 1;
+    if (position >= totalRecords) {
+        cout << format("Позиция {} недопустима для добавления записи. Число должно быть от 1 до {}.\n", ++position, totalRecords);
+        return;
+    };
+    
+    cout << "\n";
     try {
         Books book = inputNewRecord();
 
-        ifstream inputFile(currentFile);
-        ofstream tempFile("temp.txt");
-        if (!inputFile || !tempFile) {
-            throw runtime_error("Ошибка открытия файлов для добавления записи.");
-        }
+        if (position < books.size()) books.insert(books.begin() + position, book); 
+        else books.push_back(book); 
 
-        int currentLine = 0;
-        bool isWrite = false;
-        string line;
-        while (getline(inputFile, line)) {
-            if (currentLine == position + 1) {
-                writeRecord(tempFile, book);
-                isWrite = true;
-            }
-            tempFile << line << "\n";
-            ++currentLine;
-        }
-
-        if (!isWrite) {
-            writeRecord(tempFile, book);
-        }
-
-        inputFile.close();
-        tempFile.close();
-
-        if (remove(currentFile.c_str()) != 0) {
-            perror("Ошибка при удалении оригинального файла");
-            return;
-        }
-        if (rename("temp.txt", currentFile.c_str()) != 0) {
-            perror("Ошибка при переименовании временного файла");
-            return;
-        }
-
-        cout << "Запись успешно добавлена на позицию " << position << ".\n";
+        writeAllBooks(currentFile, books);
+        cout << "Запись успешно добавлена на позицию " << ++position << ".\n";
     }
-    catch (const runtime_error& e) {
-        cerr << "Ошибка при выполнении записи в файл по позиции: " << e.what() << "\n";
+    catch (const FileException& e) {
+        cerr << format("Ошибка при выполнении записи в файл по позиции: {}", ++position) << e.what() << "\n";
     }
 }
 
 Books inputNewRecord() {
     Books book;
-
-    cout << "\nВведите номер книги: ";
     string input;
-    cin >> input;
-    cin.ignore();
-    try {
-        book.bookID = stoi(input);
 
-        if (!isBookIDUnique(book.bookID)) {
-            throw runtime_error("Номер книги уже существует. Введите уникальный номер.");
+    while (true) {
+        cout << "Введите номер книги: ";
+        cin >> input;
+        cin.ignore();
+        if (!isValidNumber(input, false, false)) { 
+            cerr << (format("Ошибка: ввод {} недопустим. Номер книги должнен быть натуральным числом.\n", input)); 
+            continue;
         }
-    }
-    catch (const exception& e) {
-        throw runtime_error(string("Ошибка ввода номера книги: ") + e.what());
+
+        try {
+            book.bookID = stoi(input);
+        }
+        catch (const exception& e) {
+            throw runtime_error(string("Ошибка: некорректное преобразование типов номера книги для вставки") + e.what());
+        }
+
+        if (!isBookIDUnique(book.bookID)) { 
+            cerr << (format("Номер книги {} уже существует. Введите уникальный номер.\n", input)); 
+            continue;
+        }
+        break;
     }
 
-    cout << "Введите авторов (или ? если автор неизвестен): ";
-    getline(cin, book.authors);
-    if (book.authors == "?") {
-        book.authors = "Неизвестно";
+    while (true) {
+        cout << "Введите авторов (или ? если автор неизвестен): ";
+        getline(cin, book.authors);
+        if (book.authors.empty()) {
+            cerr << ("Строка не может быть пустой. Введите автора.\n");
+            continue;
+        }
+
+        if (book.authors == "?") book.authors = "Автор неизвестен";
+        break;
     }
 
-    cout << "Введите название книги: ";
-    getline(cin, book.title);
+    while (true) {
+        cout << "Введите название книги: ";
+        getline(cin, book.title);
+
+        if (!book.title.empty()) break;
+        else cerr << ("Строка не может быть пустой. Введите название книги.\n");
+    }
 
     book.releaseDate = inputReleaseDate();
 
-    cout << "Введите цену: ";
-    cin >> input;
-    try {
-        book.price = stod(input);
-    }
-    catch (const exception&) {
-        throw runtime_error("Ошибка ввода цены. Введите число.");
-    }
-
-    cout << "Введите количество: ";
-    cin >> input;
-    try {
-        book.quantity = stoi(input);
-    }
-    catch (const exception&) {
-        throw runtime_error("Ошибка ввода количества. Введите целое число.");
+    while (true) {
+        cout << "Введите цену: ";
+        cin >> input;
+        if (!isValidNumber(input, true, false)) {
+            cerr << (format("Ошибка: ввод {} недопустим.\nЦена - положительная десятичная дробь с опциональной десятичной частью, содержащая от 1 до 2 цифр.\n", input));
+            continue;
+        }
+        try {
+            book.price = stod(input);
+        }
+        catch (const exception& e) {
+            throw runtime_error(string("Ошибка: некорректое преобразование типов цены") + e.what());
+        }
+        break;
     }
 
-    cout << "Введите дату продажи (ГГГГ-ММ-ДД): ";
-    cin >> book.saleDate;
-    if (!isValidDate(book.saleDate)) {
-        throw runtime_error("Некорректная дата продажи.");
+    while (true) {
+        cout << "Введите количество: ";
+        cin >> input;
+        if (!isValidNumber(input, false, false)) {
+            cerr << (format("Ошибка: ввод {} недопустим. Количество должно быть натуральным числом.\n", input));
+            continue;
+        }
+        try {
+            book.quantity = stoi(input);
+        }
+        catch (const exception& e) {
+            throw runtime_error(string("Ошибка: некорректое преобразование типов количества") + e.what());
+        }
+        break;
     }
 
+    while (true) {
+        cout << "Введите дату продажи в формате ГГГГ-ММ-ДД: ";
+        cin >> book.saleDate;
+        if (!isValidDate(book.saleDate)) {
+            cerr << (format("Ошибка: {} - некорректная дата продажи.", book.saleDate));
+            continue;
+        }
+        break;
+    }
     return book;
 }
 
-bool isBookIDUnique(int bookID) {
-    ifstream file(currentFile);
-    if (!file) {
-        throw runtime_error("Ошибка открытия файла \"" + currentFile + "\" для проверки уникальности.");
+bool isBookIDUnique(int bookID)  {
+    try {
+        vector<Books> books = readAllBooks(currentFile);
+        auto it = find_if(books.begin(), books.end(), [bookID](const Books& book) {
+            return book.bookID == bookID;
+            });
+        return it == books.end();
     }
-
-    string line;
-
-    for (int i = 0; i < 2; ++i) {
-        if (!getline(file, line)) {
-            break;
-        }
+    catch (const exception&) {
+        throw FileException("Ошибка при чтении данных из файла при поиске уникального номера.\n");
+        return false;
     }
-
-    while (getline(file, line)) {
-        istringstream record(line);
-        string idStr;
-        if (getline(record, idStr, '|')) {
-            try {
-                int existingID = stoi(idStr);
-                if (existingID == bookID) {
-                    file.close();
-                    return false;
-                }
-            }
-            catch (const exception&) {
-                cerr << "Ошибка при чтении данных из файла.\n";
-                file.close();
-                return false;
-            }
-        }
-    }
-    file.close();
-    return true;
 }
 
 string inputReleaseDate() {
     while (true) {
-        cout << "Введите дату выпуска (ГГГГ-ММ-ДД, только год ГГГГ, или ? если дата неиз-вестна): ";
-        string date;
-        cin >> date;
+        cout << "Введите дату выпуска в формате ГГГГ-ММ-ДД, (только год - ГГГГ, или ? - если дата неизвестна): ";
+        string inputDate;
+        cin >> inputDate;
 
-        if (date == "?") {
-            return "Неизвестно";
-        }
+        if (inputDate == "?") return "Неизвестно";
 
-        if (date.length() == 4) {
-            try {
-                int year = stoi(date);
-                if (year < 1000 || year > 9999) {
-                    throw invalid_argument("Год должен быть 4-значным числом.");
-                }
-                return date + "-00-00";
+        if (inputDate.length() == 4) {
+            if (!isValidNumber(inputDate, false, false)) { 
+                cerr << (format("Ошибка: ввод {} недопустим. Год должнен быть натуральным числом.\n", inputDate)); 
+                continue;
             }
-            catch (const exception&) {
+            try {
+                int year = stoi(inputDate);
+                time_t now = time(nullptr);
+                tm currentTime;
+
+                if (localtime_s(&currentTime, &now) != 0) {
+                    throw runtime_error("Ошибка: не удалось получить текущее время.");
+                }
+                int currentYear = currentTime.tm_year + 1900;
+
+                if (year < 1000 || year > currentYear) {
+                    cerr << ("Ошибка: год должен быть в диапазоне от 1000 до текущего года.\n");
+                    continue;
+                }
+                return inputDate + "-00-00";
+            }
+            catch (const DateException&) {
                 cerr << "Ошибка: некорректный год. Попробуйте снова.\n";
                 continue;
             }
         }
-
-        if (isValidDate(date)) {
-            return date;
-        }
-        else {
-            cerr << "Ошибка: некорректная дата. Используйте формат ГГГГ-ММ-ДД.\n";
-        }
+        if (isValidDate(inputDate)) return inputDate;
+        else cerr << format("Дата \"{}\" введена неверно \n", inputDate);        
     }
 }
 
 bool isValidDate(const string& date) {
-    if (date.length() != 10 || date[4] != '-' || date[7] != '-') {
+    using namespace chrono;
+
+    regex dateRegex(R"(^\d{4}-\d{2}-\d{2}$)");
+    if (!regex_match(date, dateRegex)) {
+        cerr << format("Ошибка: {} не соответствует формату ГГГГ-ММ-ДД. ", date);
         return false;
     }
 
-    try {
-        int year = stoi(date.substr(0, 4));
-        int month = stoi(date.substr(5, 2));
-        int day = stoi(date.substr(8, 2));
+    istringstream stream(date);
+    year_month_day ymd;
+    stream >> parse("%F", ymd);
 
-        if (year < 1000 || year > 9999) {
-            return false;
-        }
-        if (month < 1 || month > 12) {
-            return false;
-        }
-
-        static const int daysInMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-        int maxDays = daysInMonth[month - 1];
-
-        if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-            maxDays = 29;
-        }
-
-        if (day < 1 || day > maxDays) {
-            return false;
-        }
-
-        return true;
-    }
-    catch (const exception&) {
+    if (!ymd.ok()) return false;
+    
+    auto today = year_month_day(floor<days>(system_clock::now()));
+    if (ymd > today) {
+        cerr << "Введённая дата не должна быть позднее текущей. ";
         return false;
     }
+    return true;
 }
 
-int countLinesInFile(const string& filename) {
-    ifstream file(filename);
-    if (!file) {
-        throw runtime_error("Не удалось открыть файл \"" + filename + "\" для подсчёта строк.");
-    }
+bool isValidNumber(const string& input, bool allowDecimal, bool allowZero) {
+    regex numberRegex;
 
-    int count = 0;
-    string line;
-    while (getline(file, line)) {
-        ++count;
-    }
-    return count;
+    if (allowDecimal) numberRegex = allowZero ? regex(R"(^\d+([.,]\d{1,2})?$)") : regex(R"(^([1-9]\d*|0)([.,]\d{1,2})?$)");
+    else numberRegex = allowZero ? regex(R"(^\d+$)") : regex(R"(^[1-9]\d*$)");
+   
+    return regex_match(input, numberRegex);
 }
 
 void addTableHeader(ofstream& file) {
-    file << left << setw(10) << "ID" << "|"
-        << setw(20) << "Авторы" << "|"
-        << setw(30) << "Название" << "|"
-        << setw(15) << "Дата выхода" << "|"
-        << setw(10) << "Цена" << "|"
-        << setw(10) << "Кол-во" << "|"
-        << setw(15) << "Дата продажи" << "|"
+    file << left << "|" << setw(10) << "    ID" << "|"
+        << setw(20) << "       Авторы" << "|"
+        << setw(34) << "             Название" << "|"
+        << setw(11) << "Дата выхода" << "|"
+        << setw(10) << "   Цена" << "|"
+        << setw(6) << "Кол-во" << "|"
+        << setw(12) << "Дата продажи" << "|"
         << "\n";
-    file << string(110, '-') << "\n";
+    file << string(111, '-') << "\n";
 }
 
-void writeRecord(ofstream& file, const Books& book) {
-    file << left << setw(10) << book.bookID << "|"
-        << setw(20) << book.authors << "|"
-        << setw(30) << book.title << "|"
-        << setw(15) << book.releaseDate << "|"
-        << setw(10) << fixed << setprecision(2) << book.price << "|"
-        << setw(10) << book.quantity << "|"
-        << setw(15) << book.saleDate << "|"
-        << "\n";
+vector<Books> readAllBooks(const string& filename) {
+    vector<Books> books;
+    ifstream file(filename);
+    string line;
+
+    for (int i = 0; i < 2; ++i) {
+        if (!getline(file, line)) break;
+    }
+
+    while (getline(file, line)) {
+        if (auto bookOpt = Books::fromFileLine(line); bookOpt) books.push_back(bookOpt.value());
+    }
+    return books;
+}
+
+void writeAllBooks(const string& filename, const vector<Books>& books) {
+    ofstream file(filename);
+
+    file.seekp(0, ios::end);
+
+    if (file.tellp() == 0) addTableHeader(file);
+
+    for (const auto& book : books) {
+        file << book.toString() << '\n';
+    }
+    file.close();
+}
+
+unsigned int countRecords(const vector<Books>& books) {
+    size_t size = books.size();
+    if (size > static_cast<size_t>(numeric_limits<unsigned int>::max())) throw overflow_error("Размер контейнера превышает предел int.");
+    
+    return static_cast<unsigned int>(size);
 }
 
 void displayRecords() {
+    checkCurrentFile();
+
     ifstream file(currentFile);
     if (!file) {
-        cerr << "Ошибка открытия файла \"" + currentFile + "\" для чтения записи. \n";
+        throw FileException(format("Ошибка: не удалось открыть файл \"{}\" для чтения.\n", currentFile));
         return;
     }
 
     string line;
+    cout << '\n';
     while (getline(file, line)) {
         cout << line << '\n';
     }
@@ -530,277 +634,147 @@ void displayRecords() {
 }
 
 void deleteRecordByNumber() {
-    cout << "Введите номер записи для удаления: ";
-    int targetNumber;
-    cin >> targetNumber;
+    checkCurrentFile();
 
-    targetNumber = --targetNumber;
-    int totalRecords = countLinesInFile(currentFile) - 2;
-    if (targetNumber < 0 || targetNumber >= totalRecords) {
-        cerr << "Ошибка: номер записи за пределами допустимого диапазона (1 - " << totalRecords << ").\n";
+    string inputId;
+    unsigned int targetNumber;   
+    vector<Books> books = readAllBooks(currentFile);
+    unsigned int totalRecords = countRecords(books);
+
+    inputId = getInputWithCancel(format("Введите номер записи для удаления от 1 до {}:", totalRecords));
+    if (inputId.empty()) return;
+
+    if (!isValidNumber(inputId, false, false)) {
+        throw InputException(format("Ошибка: ввод {} недопустим. Номер записи должнен быть натуральным числом.\n", inputId));
         return;
     }
 
-    processFileWithFilter(
-        [targetNumber, currentLine = 0](const string&) mutable {
-            return currentLine++ == targetNumber;
-        },
-        "Запись с указанным номером не найдена."
-    );
+    try {
+        targetNumber = stoi(inputId) - 1;
+    }
+    catch (const exception& e) {
+        throw runtime_error(string("Ошибка: некорректное преобразование типов номера записи книги для удаления") + e.what());
+    }
+
+    if (targetNumber >= totalRecords) {
+        throw InputException(format("Ошибка: номер записи за пределами допустимого диапазона (1 - {}).", totalRecords));
+        return;
+    }
+    books.erase(books.begin() + targetNumber);
+
+    writeAllBooks(currentFile, books);
+    cout << format("Запись с номером строки {} успешно удалена.\n", ++targetNumber);
 }
 
 void deleteRecordsByReleaseDate() {
-    cout << "Удаление записей по дате выпуска.\n";
+    checkCurrentFile();
+
+    string filename = getInputWithCancel("Удаление записей по дате выпуска. Для продолжения нажмите любую клавишу");
+    if (filename.empty()) return;
 
     string targetDate = inputReleaseDate();
 
-    processFileWithFilter(
-        [targetDate](const string& line) {
-            istringstream record(line);
-            string id, authors, title, releaseDate, price, quantity, saleDate;
+    vector<Books> books = readAllBooks(currentFile);
+    vector<Books> filteredBooks;
+    int deletedCount = 0;
 
-            if (getline(record, id, '|') &&
-                getline(record, authors, '|') &&
-                getline(record, title, '|') &&
-                getline(record, releaseDate, '|')) {
-
-                releaseDate.erase(0, releaseDate.find_first_not_of(" \t"));
-                releaseDate.erase(releaseDate.find_last_not_of(" \t") + 1);
-
-                if (releaseDate == targetDate) return true;
-            }
-            return false;
-        },
-        "Записи с указанной датой выпуска не найдены."
-    );
-}
-
-template <typename FilterFunc>
-void processFileWithFilter(FilterFunc shouldDelete, const string& errorMessage) {
-    ifstream inputFile(currentFile);
-    if (!inputFile) {
-        cerr << "Ошибка: не удалось открыть файл \"" << currentFile << "\" для чте-ния.\n";
-        return;
+    for (const auto& book : books) {
+        if (book.releaseDate != targetDate) filteredBooks.push_back(book);
+        else ++deletedCount;
     }
 
-    ofstream tempFile("temp.txt");
-    if (!tempFile) {
-        cerr << "Ошибка: не удалось создать временный файл для записи.\n";
-        inputFile.close();
-        return;
-    }
-
-    string line;
-    int lineCount = 0;
-    int removedCount = 0;
-
-    while (getline(inputFile, line)) {
-        ++lineCount;
-        if (lineCount == 1 || lineCount == 2) {
-            tempFile << line << "\n";
-            continue;
-        }
-
-        if (shouldDelete(line)) {
-            ++removedCount;
-            continue;
-        }
-
-        tempFile << line << "\n";
-    }
-
-    inputFile.close();
-    tempFile.close();
-
-    if (remove(currentFile.c_str()) != 0) {
-        perror("Ошибка при удалении оригинального файла");
-        return;
-    }
-    if (rename("temp.txt", currentFile.c_str()) != 0) {
-        perror("Ошибка при переименовании временного файла");
-        return;
-    }
-
-    if (removedCount > 0) {
-        cout << "Удалено записей: " << removedCount << ".\n";
-    }
+    if (books.size() == filteredBooks.size()) cout << format("Нет записей с датой выпуска {}.\n", targetDate);
     else {
-        cout << errorMessage << "\n";
+        writeAllBooks(currentFile, filteredBooks);
+        cout << format("Записи с датой выпуска \"{}\" удалены. Удалено записей: \"{}\".\n", targetDate, deletedCount);
     }
 }
 
 void updateBookPrice() {
     checkCurrentFile();
 
-    cout << "Введите ID книги для изменения цены: ";
-    int bookID;
-    cin >> bookID;
-    cin.ignore();
+    unsigned int bookID;
+    string newPriceStr;
+    string inputId = getInputWithCancel("Введите ID книги для изменения цены");
+    if (inputId.empty()) return;
+
+    if (!isValidNumber(inputId, false, false)) throw InputException(format("Ошибка: ввод {} недопустим. Номер книги должнен быть натуральным числом.\n", inputId));
 
     try {
-        if (isBookIDUnique(bookID)) {
-            cout << "Книга с ID " << bookID << " не найдена в файле.\n";
+        bookID = stoi(inputId);
+    }
+    catch (const exception& e) {
+        throw runtime_error(string("Ошибка: некорректное преобразование типов номера книги для изменения цены") + e.what());
+    }
+
+    try {
+        vector<Books> books = readAllBooks(currentFile);
+        auto it = find_if(books.begin(), books.end(), [bookID](const Books& book) {
+            return book.bookID == bookID;
+            });
+        
+        if (it == books.end()) {
+            cout << format("Книга с ID \"{}\" не найдена.\n", bookID);
             return;
         }
 
         cout << "Введите новую цену книги: ";
-        string newPriceStr;
         cin >> newPriceStr;
 
         try {
-            double price = stod(newPriceStr);
-            if (price < 0) {
-                cout << "Ошибка: Цена не может быть отрицательной.\n";
-                return;
-            }
+            double newPrice = stod(newPriceStr);
+            it->price = newPrice;
         }
-        catch (const invalid_argument&) {
-            cout << "Ошибка: Введено некорректное значение для цены.\n";
+        catch (const FileException&) {
+            cout << "Ошибка: Некорректное преобразование типов цены для изменения.\n";
             return;
         }
 
-        ifstream inputFile(currentFile);
-        ofstream tempFile("temp.txt");
-        if (!inputFile || !tempFile) {
-            throw runtime_error("Ошибка открытия файла.");
-        }
-
-        string line;
-        int lineCount = 0;
-        bool found = false;
-
-        while (getline(inputFile, line)) {
-            ++lineCount;
-            if (lineCount == 1 || lineCount == 2) {
-                tempFile << line << "\n";
-                continue;
-            }
-
-            istringstream record(line);
-            string idStr, authors, title, releaseDate, priceStr, quantity, saleDate;
-
-            if (getline(record, idStr, '|') &&
-                getline(record, authors, '|') &&
-                getline(record, title, '|') &&
-                getline(record, releaseDate, '|') &&
-                getline(record, priceStr, '|') &&
-                getline(record, quantity, '|') &&
-                getline(record, saleDate)) {
-
-                idStr.erase(0, idStr.find_first_not_of(" \t"));
-                idStr.erase(idStr.find_last_not_of(" \t") + 1);
-
-                try {
-                    int existingID = stoi(idStr);
-                    if (existingID == bookID) {
-                        found = true;
-                        tempFile << left << setw(10) << idStr << "|"
-                            << setw(20) << authors << "|"
-                            << setw(30) << title << "|"
-                            << setw(15) << releaseDate << "|"
-                            << setw(10) << fixed << setprecision(2) << newPriceStr << "|"
-                            << setw(10) << quantity << "|"
-                            << setw(15) << saleDate << "\n";
-                    }
-                    else {
-                        tempFile << line << "\n";
-                    }
-                }
-                catch (const invalid_argument&) {
-                    cerr << "Ошибка: некорректный ID в файле.\n";
-                    tempFile << line << "\n";
-                }
-            }
-            else {
-                tempFile << line << "\n";
-            }
-        }
-
-        inputFile.close();
-        tempFile.close();
-
-        if (remove(currentFile.c_str()) != 0) {
-            perror("Ошибка при удалении оригинального файла");
-            return;
-        }
-        if (rename("temp.txt", currentFile.c_str()) != 0) {
-            perror("Ошибка при переименовании временного файла");
-            return;
-        }
-
-        if (found) {
-            cout << "Цена книги с ID " << bookID << " успешно обновлена.\n";
-        }
-        else {
-            cout << "Книга с ID " << bookID << " не найдена в файле.\n";
-        }
-    }
-    catch (const runtime_error& e) {
-        cerr << "Ошибка при выполнении действия: " << e.what() << "\n";
+        writeAllBooks(currentFile, books);
+        cout << format("Цена книги с номером книги \"{}\" успешно обновлена.\n", bookID);
     }
     catch (const exception& e) {
-        cerr << "Ошибка: " << e.what() << "\n";
+        cerr << "Непредвиденная ошибка: " << e.what() << "\n";
     }
 }
 
 void displayBooksInTimeRange() {
-    ifstream file(currentFile);
-    if (!file) {
-        cerr << "Ошибка открытия файла \"" << currentFile << "\" для чтения.\n";
-        return;
-    }
+    checkCurrentFile();
 
     string startDate, endDate;
-    cout << "Введите начальную дату (в формате ГГГГ-ММ-ДД): ";
-    cin >> startDate;
+    startDate = getInputWithCancel("Введите начальную дату в формате ГГГГ-ММ-ДД");
+    if (startDate.empty()) return;
+
     if (!isValidDate(startDate)) {
-        cerr << "Ошибка: некорректная начальная дата.\n";
+        throw DateException(format("Начальная дата {} некорректная.\n", startDate));
         return;
     }
 
-    cout << "Введите конечную дату (в формате ГГГГ-ММ-ДД): ";
-    cin >> endDate;
-    if (!isValidDate(endDate)) {
-        cerr << "Ошибка: некорректная конечная дата.\n";
-        return;
-    }
-
-    string line;
-
-    int lineCount = 0;
-    bool found = false;
-
-    while (getline(file, line)) {
-        ++lineCount;
-
-        if (lineCount == 1 || lineCount == 2) {
-            cout << line << "\n";
+    while (true) {
+        cout << "Введите конечную дату в формате ГГГГ-ММ-ДД: ";
+        cin >> endDate;
+        if (!isValidDate(endDate)) {
+            cerr << format("Конечная дата {} некорректная.\n", endDate);
             continue;
         }
+        break;
+    }
 
-        istringstream record(line);
-        string idStr, authors, title, releaseDate, priceStr, quantityStr, saleDate;
+    vector<Books> books = readAllBooks(currentFile);
+    if (!books.empty()) {
+        cout << format("\n|{:<10}|{:<20}|{:<34}|{:<11}|{:<10}|{:<6}|{:<12}|\n",
+            "    ID", "       Авторы", "             Название", "Дата выхода", "   Цена", "Кол-во", "Дата продажи");
+        cout << string(111, '-') << "\n";
+    }
 
-        if (getline(record, idStr, '|') && getline(record, authors, '|') &&
-            getline(record, title, '|') && getline(record, releaseDate, '|') &&
-            getline(record, priceStr, '|') && getline(record, quantityStr, '|') &&
-            getline(record, saleDate, '|')) {
-
-            if (saleDate >= startDate && saleDate <= endDate) {
-                cout << left << setw(10) << idStr << "|"
-                    << setw(20) << authors << "|" << setw(30) << title << "|"
-                    << setw(15) << releaseDate << "|" << setw(10) << priceStr << "|"
-                    << setw(10) << quantityStr << "|" << setw(15) << saleDate << "|" << "\n";
-                found = true;
-            }
+    bool found = false;
+    for (const auto& book : books) {
+        if (book.saleDate >= startDate && book.saleDate <= endDate) {
+            cout << book.toString() << "\n";
+            found = true;
         }
     }
-
-    if (!found) {
-        cout << "Нет записей о проданных книгах в заданный промежуток времени.\n";
-    }
-
-    file.close();
+    if (!found) cout << format("Записей в диапазоне дат {} - {} не найдено.\n", startDate, endDate);
 }
 
 void backupFile() {
@@ -808,27 +782,13 @@ void backupFile() {
 
     string backupFile = currentFile + "_backup";
 
-    ifstream source(currentFile, ios::binary);
-    if (!source) {
-        throw runtime_error("Ошибка: не удалось открыть файл \"" + currentFile + "\" для чтения.");
-    }
-
-    ofstream backup(backupFile, ios::binary);
-    if (!backup) {
-        throw runtime_error("Ошибка: не удалось создать файл \"" + backupFile + "\" для записи.");
-    }
-
     try {
-        backup << source.rdbuf();
+        copy_file(currentFile, backupFile, copy_options::overwrite_existing);
     }
-    catch (const exception& e) {
-        cerr << "Ошибка при копировании данных в резервный файл: " << e.what() << "\n";
+    catch (const filesystem_error& e) {
+        throw FileException(format("Ошибка при создании резервной копии: {}", e.what()));
     }
-
-    source.close();
-    backup.close();
-
-    cout << "Данные успешно скопированы в резервный файл: \"" << backupFile << "\".\n";
+    cout << format("Данные успешно скопированы в резервный файл: \"{}\".\n", backupFile);
 }
 
 void restoreFileFromBackup() {
@@ -836,33 +796,36 @@ void restoreFileFromBackup() {
 
     string backupFile = currentFile + "_backup";
 
-    ifstream backup(backupFile, ios::binary);
-    if (!backup) {
-        throw runtime_error("Ошибка: резервный файл \"" + backupFile + "\" не найден.");
-    }
-
-    ofstream restoredFile(currentFile, ios::binary);
-    if (!restoredFile) {
-        throw runtime_error("Ошибка: не удалось открыть файл \"" + currentFile + "\" для записи.");
-    }
-
     try {
-        restoredFile << backup.rdbuf();
-    }
-    catch (const std::exception& e) {
-        cerr << "Ошибка при копировании данных из резервного файла: " << e.what() << "\n";
-    }
+        if (!exists(backupFile)) {
+            throw FileException(format("Резервный файл \"{}\" не найден.", backupFile));
+        }
 
-    backup.close();
-    restoredFile.close();
+        if (file_size(backupFile) == 0) {
+            if (!confirmAction(format("Резервный файл \"{}\" пуст. Вы уверены, что хотите продолжить восстановление?", backupFile))) {
+                cout << "Выбор файла отменён.\n";
+                return;
+            }
+        }
 
-    cout << "Файл \"" << currentFile << "\" успешно восстановлен из резервного файла.\n";
+        copy_file(backupFile, currentFile, copy_options::overwrite_existing);
+        cout << format("Файл \"{}\" успешно восстановлен из резервного файла.\n", currentFile);
+    }
+    catch (const filesystem_error& e) {
+        cerr << "Ошибка при работе с файлами: " << e.what() << "\n";
+    }
+    catch (const FileException& e) {
+        cerr << "Ошибка: " << e.what() << "\n";
+    }
+    catch (const exception& e) {
+        cerr << "Непредвиденная ошибка: " << e.what() << "\n";
+    }
 }
 
 void deleteFile() {
     checkCurrentFile();
 
-    cout << "Вы действительно хотите удалить файл \"" << currentFile << "\"? (y/n): ";
+    cout << format("Вы действительно хотите удалить файл \"{}\"? (y/любая клавиша): ", currentFile);
     char confirmation;
     cin >> confirmation;
 
@@ -871,16 +834,14 @@ void deleteFile() {
         return;
     }
 
-    if (std::remove(currentFile.c_str()) != 0) {
-        perror(("Ошибка при удалении файла \"" + currentFile + "\"").c_str());
+    if (remove(currentFile.c_str()) != 0) {
+        perror((format("Ошибка при удалении файла \"{}\"", currentFile)).c_str());
         return;
     }
 
-    cout << "Файл \"" << currentFile << "\" успешно удалён.\n";
-
+    cout << format("Файл \"{}\" успешно удалён.\n", currentFile);
     currentFile.clear();
 }
-
 
 
 // Запуск программы: CTRL+F5 или меню "Отладка" > "Запуск без отладки"
